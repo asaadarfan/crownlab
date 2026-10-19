@@ -93,3 +93,29 @@ main(int argc, char *argv[])
   find(argv[1], argv[2]);
   exit(0);
 }
+
+
+/*
+ * find: search a directory tree for files/folders with a given name.
+ *
+ * Usage: find <dir> <name>
+ *
+ * Setup (run inside xv6 after make qemu):
+ *   $ echo > b
+ *   $ mkdir a
+ *   $ echo > a/b
+ *   $ mkdir a/aa
+ *   $ echo > a/aa/b
+ *
+ * Sample commands and expected output:
+ *   $ find . b          -> ./b
+ *                          ./a/b
+ *                          ./a/aa/b
+ *   $ find a b          -> a/b
+ *                          a/aa/b
+ *   $ find . aa         -> ./a/aa          (directories match too)
+ *   $ find . README     -> ./README
+ *   $ find . zzz        -> (nothing)       (no matches)
+ *   $ find nodir b      -> find: cannot open nodir
+ *   $ find .            -> usage: find dir name
+ */

@@ -129,3 +129,47 @@ main(int argc, char *argv[])
 
   exit(find(path, argv[2], count ? &argv[4] : 0, count));
 }
+
+
+/*
+ * find: search a directory tree for files/folders with a given name.
+ *       With -exec, run a command on each match instead of printing it.
+ *
+ * Usage: find <dir> <name> [-exec <cmd> [args...]]
+ *
+ * Setup (run inside xv6 after make qemu):
+ *   $ echo > b
+ *   $ mkdir a
+ *   $ echo > a/b
+ *   $ mkdir a/aa
+ *   $ echo > a/aa/b
+ *   $ echo hello > a/hi
+ *
+ * Without -exec:
+ *   $ find . b          -> ./b
+ *                          ./a/b
+ *                          ./a/aa/b
+ *   $ find a b          -> a/b
+ *                          a/aa/b
+ *   $ find . aa         -> ./a/aa          (directories match too)
+ *   $ find . zzz        -> (nothing)       (no matches)
+ *   $ find nodir b      -> find: cannot open nodir
+ *
+ * With -exec (the found path is added as the last argument):
+ *   $ find . wc -exec echo hi        -> hi ./wc
+ *   $ find . b -exec echo found      -> found ./b
+ *                                       found ./a/b
+ *                                       found ./a/aa/b
+ *   $ find . hi -exec cat            -> hello        (runs: cat ./a/hi)
+ *   $ find . hi -exec wc             -> 1 1 6 ./a/hi
+ *   $ find . zzz -exec echo hi       -> (nothing)    (command never runs)
+ *   $ find . b -exec nosuchcmd       -> find: exec nosuchcmd failed  (x3)
+ *
+ * Usage errors:
+ *   $ find .                         -> usage message
+ *   $ find . b -exec                 -> usage message (no command)
+ *   $ find . b -foo echo             -> usage message (not -exec)
+ *
+ * Official test:  $ sh < findtest.sh   (inside xv6)
+ *                 $ make grade         (in the Ubuntu terminal)
+ */
