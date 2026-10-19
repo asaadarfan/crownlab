@@ -1,0 +1,171 @@
+/*
+ * ============================================================================
+ *  UTIL LAB, TASK 3: memdump      (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 1  user/memdump.c   PART A: enough() helper
+ *                            PART B: memdump(fmt, data, len)
+ *                            PART C: main()  (your lab may already give one)
+ *   STEP 2  Makefile         add $U/_memdump\ to UPROGS
+ *   TESTING / ERRORS         at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    Implement  void memdump(char *fmt, char *data, int len)
+ *    Walk fmt; for each format char, read bytes from data and print them:
+ *
+ *      CHAR  BYTES  PRINT AS
+ *      ----  -----  ------------------------------------------
+ *       i      4    signed int, decimal
+ *       p      8    64-bit value, hex
+ *       h      2    short int, decimal
+ *       c      1    one ASCII character
+ *       s      8    a POINTER to a C string -> print that string
+ *       S    rest   the rest of data is a NUL-terminated string
+ *
+ *    Never read past len. If not enough bytes are left:
+ *        memdump: not enough data for 'X'     and stop.
+ *
+ *  HOW IT WORKS
+ *    p = cursor into data, end = data + len.
+ *    For each fmt char: check (end - p) >= size, memcpy into a local
+ *    variable, print, advance p by size.
+ *    memcpy instead of *(int*)p because p may be misaligned.
+ *    Little-endian: the FIRST byte is the LOW byte.
+ *    (e.g. bytes 'd'(0x64) 'e'(0x65) as 'h' -> 0x6564 = 25956)
+ *
+ *  OUTPUT FORMAT: one value per line here. Check your lab's examples for the
+ *  exact expected format and adjust the printf lines if needed.
+ *
+ *  AFTER EDITING:  make qemu
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   user/memdump.c
+ * ============================================================================ */
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+/* ---- PART A: bounds check ------------------------------------------------- */
+/* Return 1 if at least n bytes remain in [p, end); else print error, return 0. */
+static int
+enough(char *p, char *end, int n, char f)
+{
+  if (end - p < n) {
+    printf("memdump: not enough data for '%c'\n", f);
+    return 0;
+  }
+  return 1;
+}
+
+/* ---- PART B: the function you must implement ------------------------------ */
+void
+memdump(char *fmt, char *data, int len)
+{
+  char *p = data;            /* cursor */
+  char *end = data + len;    /* one past the last valid byte */
+
+  for (; *fmt; fmt++) {
+
+    if (*fmt == 'i') {                         /* 4-byte int */
+      int v;
+      if (!enough(p, end, sizeof v, 'i')) return;
+      memcpy(&v, p, sizeof v);
+      p += sizeof v;
+      printf("%d\n", v);
+
+    } else if (*fmt == 'h') {                  /* 2-byte int */
+      short v;
+      if (!enough(p, end, sizeof v, 'h')) return;
+      memcpy(&v, p, sizeof v);
+      p += sizeof v;
+      printf("%d\n", v);
+
+    } else if (*fmt == 'p') {                  /* 8-byte value, hex */
+      uint64 v;
+      if (!enough(p, end, sizeof v, 'p')) return;
+      memcpy(&v, p, sizeof v);
+      p += sizeof v;
+      printf("%lx\n", v);
+
+    } else if (*fmt == 'c') {                  /* 1 char */
+      if (!enough(p, end, 1, 'c')) return;
+      printf("%c\n", *p);
+      p += 1;
+
+    } else if (*fmt == 's') {                  /* 8-byte pointer to string */
+      char *s;
+      if (!enough(p, end, sizeof s, 's')) return;
+      memcpy(&s, p, sizeof s);
+      p += sizeof s;
+      printf("%s\n", s);
+
+    } else if (*fmt == 'S') {                  /* rest is a string */
+      while (p < end && *p) {                  /* stop at NUL OR end */
+        printf("%c", *p);
+        p++;
+      }
+      printf("\n");
+      return;
+    }
+  }
+}
+
+/* ---- PART C: main (reads stdin, formats it with argv[1]) ------------------ */
+int
+main(int argc, char *argv[])
+{
+  char buf[512];
+
+  if (argc != 2) {
+    fprintf(2, "usage: memdump fmt   (data read from stdin)\n");
+    exit(1);
+  }
+  int n = read(0, buf, sizeof buf);
+  if (n < 0) {
+    fprintf(2, "memdump: read error\n");
+    exit(1);
+  }
+  memdump(argv[1], buf, n);
+  exit(0);
+}
+
+
+/* ============================================================================
+ * STEP 2 ---------------------------------------------------------------------
+ *   FILE   Makefile, inside UPROGS=
+ * ============================================================================ */
+
+	$U/_memdump\
+
+
+/* ============================================================================
+ *  TESTING  (xv6 $ prompt)
+ * ============================================================================
+ *   COMMAND                           EXPECTED
+ *   -------------------------------   ----------------------------------
+ *   echo deadc0de | memdump hhcccc    25956 / 25697 / c / 0 / d / e
+ *   echo ab | memdump i               memdump: not enough data for 'i'
+ *   echo hello | memdump S            hello
+ *   echo hi | memdump cc              h / i
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *   SYMPTOM                            CAUSE
+ *   --------------------------------   ------------------------------
+ *   crash / garbage on 's'             data does not hold a real pointer
+ *                                      (expected when fed from echo)
+ *   hex prints wrong / %lx unsupported older printf: print as two %x
+ *   reads past the end                 missing enough() check
+ *   wrong numbers for h/i              cursor p not advanced
+ * ============================================================================
+ */

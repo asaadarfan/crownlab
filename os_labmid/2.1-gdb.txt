@@ -1,0 +1,158 @@
+/*
+ * ============================================================================
+ *  SYSCALL LAB, TASK 1: Using gdb      (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 0  setup: two terminals, .gdbinit permission
+ *   STEP 1  break in syscall(), backtrace       -> who called syscall?
+ *   STEP 2  print the proc struct, a7           -> which syscall is it?
+ *   STEP 3  print sstatus                       -> previous CPU mode?
+ *   STEP 4  cause a kernel panic on purpose     -> faulting instruction
+ *   STEP 5  explain the crash, name the process
+ *   GDB COMMAND CHEAT TABLE                     at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    Use gdb to step through the kernel's syscall() and answer questions
+ *    in answers-syscall.txt. No code to submit except a temporary edit
+ *    you must UNDO afterwards.
+ *
+ *  IMPORTANT: answers marked "VERIFY" depend on your exact xv6 version.
+ *  Always confirm them yourself in gdb / the .asm files.
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 0  SETUP -------------------------------------------------------------
+ * ============================================================================
+ *   Terminal 1 (in xv6 dir):   make qemu-gdb
+ *                              (QEMU waits for gdb; prints a tcp port)
+ *   Terminal 2 (same dir):     gdb-multiarch          (Ubuntu/Pop!_OS)
+ *                         or   riscv64-unknown-elf-gdb
+ *
+ *   If gdb says ".gdbinit auto-loading declined", add this line to
+ *   ~/.gdbinit  (your home dir), using YOUR path to xv6:
+ *       add-auto-load-safe-path ~/Desktop/OS/xv6-riscv/.gdbinit
+ *   then restart gdb. (.gdbinit connects gdb to QEMU and loads the kernel.)
+ */
+
+
+/* ============================================================================
+ * STEP 1  WHO CALLS syscall()? -----------------------------------------------
+ * ============================================================================
+ *   (gdb) b syscall
+ *   (gdb) c
+ *   (gdb) layout src          (optional: shows source)
+ *   (gdb) backtrace           (or: bt)
+ *
+ *   ANSWER: usertrap()  in kernel/trap.c
+ *   WHY:    ecall traps into the kernel -> uservec (trampoline.S) ->
+ *           usertrap() sees scause == 8 (syscall) -> calls syscall().
+ */
+
+
+/* ============================================================================
+ * STEP 2  WHAT IS a7? -------------------------------------------------------
+ * ============================================================================
+ *   (gdb) n                   (repeat until past  struct proc *p = myproc(); )
+ *   (gdb) p/x *p              (whole proc struct in hex)
+ *   (gdb) p p->trapframe->a7
+ *
+ *   MEANING: a7 = the SYSTEM CALL NUMBER the user program asked for
+ *            (the usys.pl stub does  li a7, SYS_xxx  before ecall).
+ *   WHICH ONE: the first syscall made by the first user program (init).
+ *            VERIFY: open user/init.asm, find the first "ecall", and look
+ *            at the "li a7,N" just before it. Match N in kernel/syscall.h.
+ *            (In init.c the first call is usually open("console", ...)
+ *             -> 15 = SYS_open; in older versions with initcode it is
+ *             7 = SYS_exec.)
+ */
+
+
+/* ============================================================================
+ * STEP 3  PREVIOUS MODE -----------------------------------------------------
+ * ============================================================================
+ *   (gdb) p/x $sstatus
+ *
+ *   Look at bit 8 = SPP (Supervisor Previous Privilege).
+ *      SPP = 0  ->  previous mode was USER mode
+ *      SPP = 1  ->  previous mode was supervisor (kernel) mode
+ *   Bit 8 has value 0x100. Check:  (value & 0x100) == 0 ?
+ *   ANSWER (expected): 0 -> the CPU was in USER mode before the trap,
+ *           which makes sense: a user program made the syscall.
+ */
+
+
+/* ============================================================================
+ * STEP 4  CAUSE A PANIC ON PURPOSE -----------------------------------------
+ * ============================================================================
+ *   FILE   kernel/syscall.c, inside syscall()
+ *   CHANGE (temporarily!)
+ *          num = p->trapframe->a7;
+ *   TO
+ *          num = * (int *) 0;            // read from address 0
+ *   then:  make qemu   (not qemu-gdb)
+ *
+ *   The kernel panics and prints something like:
+ *      scause=0xd sepc=0x80002xxx stval=0x0
+ *        scause 0xd = 13 = LOAD PAGE FAULT
+ *        sepc   = address of the faulting instruction
+ *        stval  = 0 = the bad address we tried to read
+ *
+ *   Find the instruction:  search  kernel/kernel.asm  for the sepc value.
+ *   You will see a load like   lw  a3,0(zero)
+ *   -> the register after "lw" holds num (often a3; VERIFY in your asm).
+ *
+ *   Confirm with gdb:  make qemu-gdb, then
+ *   (gdb) b *0x80002xxx       (your sepc value)
+ *   (gdb) c
+ *   (gdb) layout asm
+ *   (gdb) n                   -> panic happens on this instruction
+ */
+
+
+/* ============================================================================
+ * STEP 5  WHY IT CRASHES + WHICH PROCESS ------------------------------------
+ * ============================================================================
+ *   WHY: virtual address 0 is NOT MAPPED in the kernel's page table.
+ *        (Kernel address space, xv6 book figure 3.3: low addresses only
+ *         hold device registers starting at 0x0C000000 / 0x10000000;
+ *         kernel code and RAM start at KERNBASE = 0x80000000.)
+ *        Loading from an unmapped address -> load page fault
+ *        (scause 13) -> kernel panics.
+ *
+ *   WHICH PROCESS: at the breakpoint before the crash,
+ *   (gdb) p p->name           -> VERIFY (likely "init" or "initcode")
+ *   (gdb) p p->pid            -> 1
+ *
+ *   !!! UNDO the change from step 4 after you are done !!!
+ *        num = p->trapframe->a7;
+ */
+
+
+/* ============================================================================
+ *  GDB COMMAND CHEAT TABLE
+ * ============================================================================
+ *   COMMAND               DOES
+ *   -------------------   ---------------------------------------------
+ *   b syscall             breakpoint at a function
+ *   b *0x80002abc         breakpoint at an exact address
+ *   c                     continue until next breakpoint
+ *   n / s                 next line (step over) / step into
+ *   si                    one assembly instruction
+ *   bt                    backtrace (who called whom)
+ *   p x / p/x x           print value / in hex
+ *   p *p                  print a whole struct
+ *   p $sstatus, p $a7     print a register
+ *   info registers        all registers
+ *   layout src / asm      source / assembly view   (Ctrl-x a to exit)
+ *   file user/_ls         switch symbols to a user program
+ *   quit                  exit gdb
+ *
+ *   QEMU: Ctrl-a x quits QEMU.   xv6: Ctrl-p lists processes.
+ * ============================================================================
+ */

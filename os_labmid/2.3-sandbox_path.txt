@@ -1,0 +1,190 @@
+/*
+ * ============================================================================
+ *  SYSCALL LAB, TASK 3: interpose(mask, path)  -- sandbox with ALLOWED PATH
+ *  (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ *  PREREQUISITE: Task 2 must already be done and working.
+ *                (see syscall-task2-sandbox-mask.c.txt)
+ *                This file only lists what is NEW on top of Task 2.
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX                                   (jump to "STEP n")
+ * ----------------------------------------------------------------------------
+ *   STEP 1  kernel/proc.h      add path field to struct proc
+ *   STEP 2  kernel/sysproc.c   sys_interpose also saves the path
+ *   STEP 3  kernel/proc.c      fork copies the path to the child
+ *   STEP 4  kernel/syscall.c   new helper path_allowed()
+ *   STEP 5  kernel/syscall.c   change the check inside syscall()
+ *   TESTING / ERRORS           at the bottom
+ *
+ *   No new registration needed: interpose already exists from Task 2,
+ *   so user.h / usys.pl / syscall.h / syscalls[] / Makefile are UNCHANGED.
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    Extend interpose so that even when open or exec is BANNED by the mask,
+ *    a call is still ALLOWED if its pathname equals the allowed path.
+ *      - path "-"  means: no path is allowed (Task 2 behaviour).
+ *      - The allowed path is INHERITED by children, like the mask.
+ *
+ *      sandbox 32768 README grep xv6 README   ->  works (README is allowed)
+ *      sandbox 32768 README grep xv6 x        ->  grep: cannot open x
+ *
+ *  IDEA IN ONE LINE
+ *    reject a syscall  =  its bit is set in the mask
+ *                         AND NOT (it is open/exec on the allowed path)
+ *
+ *  AFTER EDITING:  make clean && make qemu
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   kernel/proc.h
+ *   WHERE  inside struct proc, right under  int interpose_mask;
+ *   WHY    each process must remember its own allowed path.
+ *          MAXPATH (128) comes from kernel/param.h (already included).
+ * ============================================================================ */
+
+  char interpose_path[MAXPATH];   /* the one path still allowed ("-" = none) */
+
+
+/* ============================================================================
+ * STEP 2 ---------------------------------------------------------------------
+ *   FILE   kernel/sysproc.c
+ *   WHERE  REPLACE the whole sys_interpose() from Task 2 with this.
+ *   WHY    argument 1 is a POINTER into user memory. The kernel cannot just
+ *          read it (different page table), so argstr() copies the string
+ *          safely into a kernel buffer. Returns < 0 if the pointer is bad.
+ *          safestrcpy() always NUL-terminates.
+ * ============================================================================ */
+
+uint64
+sys_interpose(void)
+{
+  int mask;
+  char path[MAXPATH];
+  struct proc *p = myproc();
+
+  argint(0, &mask);                       /* arg 0 -> mask */
+  if(argstr(1, path, MAXPATH) < 0)        /* arg 1 -> path string */
+    return -1;
+
+  p->interpose_mask = mask;
+  safestrcpy(p->interpose_path, path, MAXPATH);
+  return 0;
+}
+
+
+/* ============================================================================
+ * STEP 3 ---------------------------------------------------------------------
+ *   FILE   kernel/proc.c
+ *   WHERE  in the fork function (kfork() or fork()),
+ *          right AFTER your Task 2 line:
+ *              np->interpose_mask = p->interpose_mask;
+ *   WHY    INHERITANCE of the path. np = child, p = parent.
+ * ============================================================================ */
+
+  safestrcpy(np->interpose_path, p->interpose_path, MAXPATH);
+
+
+/* ============================================================================
+ * STEP 4 ---------------------------------------------------------------------
+ *   FILE   kernel/syscall.c
+ *   WHERE  ABOVE the function syscall(), and BELOW the function argstr()
+ *          (it calls argstr, so argstr must come first in the file).
+ *   WHY    decides whether a banned call is let through anyway.
+ *          open(path, ...) and exec(path, ...) BOTH take the path as
+ *          argument 0, so argstr(0, ...) reads it for either one.
+ * ============================================================================ */
+
+/* Return 1 if this is an open/exec whose path equals the allowed path. */
+static int
+path_allowed(int num, struct proc *p)
+{
+  char path[MAXPATH];
+
+  if(num != SYS_open && num != SYS_exec)      /* only open/exec have a path */
+    return 0;
+  if(p->interpose_path[0] == '-' && p->interpose_path[1] == 0)
+    return 0;                                 /* "-" means nothing allowed */
+  if(argstr(0, path, MAXPATH) < 0)            /* read the call's path arg */
+    return 0;
+  return strncmp(path, p->interpose_path, MAXPATH) == 0;
+}
+
+
+/* ============================================================================
+ * STEP 5 ---------------------------------------------------------------------
+ *   FILE   kernel/syscall.c, inside syscall()
+ *   WHERE  REPLACE the Task 2 check
+ *              if((p->interpose_mask >> num) & 1)
+ *   WHY    reject only if banned AND not the allowed path.
+ *   NOTE   path_allowed() runs BEFORE a0 is overwritten with the return
+ *          value, so argument 0 (a0) still holds the path pointer.
+ * ============================================================================ */
+
+    if(((p->interpose_mask >> num) & 1) && !path_allowed(num, p))
+      p->trapframe->a0 = -1;                 /* banned: fail */
+    else
+      p->trapframe->a0 = syscalls[num]();    /* allowed: run it */
+
+
+/* ============================================================================
+ *  FINAL syscall() FOR REFERENCE  (what the whole function looks like now)
+ * ============================================================================ */
+
+void
+syscall(void)
+{
+  int num;
+  struct proc *p = myproc();
+
+  num = p->trapframe->a7;
+  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    if(((p->interpose_mask >> num) & 1) && !path_allowed(num, p))
+      p->trapframe->a0 = -1;
+    else
+      p->trapframe->a0 = syscalls[num]();
+  } else {
+    printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);
+    p->trapframe->a0 = -1;
+  }
+}
+
+
+/* ============================================================================
+ *  TESTING  (at the xv6 $ prompt, after: make clean && make qemu)
+ * ============================================================================
+ *
+ *   COMMAND                                   EXPECTED
+ *   ---------------------------------------   ------------------------------
+ *   sandbox 32768 README grep xv6 README      matching lines of README
+ *   sandbox 32768 README grep xv6 x           grep: cannot open x
+ *   sandbox 32768 - cat README                cat: cannot open README
+ *   sandbox 32768 README sh                   then: cat README   works
+ *                                             then: cat x        fails
+ *                                             (path inherited; Ctrl-d exits)
+ *
+ *   Ban exec too:  mask = (1<<15) | (1<<7) = 32768 + 128 = 32896
+ *                  (check SYS_exec / SYS_open numbers in kernel/syscall.h)
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *
+ *   SYMPTOM                                   CAUSE
+ *   ---------------------------------------   ------------------------------
+ *   MAXPATH undeclared                        file lacks #include "param.h"
+ *                                             (syscall.c / sysproc.c have it;
+ *                                              check the include list)
+ *   path_allowed / argstr implicit decl       helper placed ABOVE argstr()
+ *                                             -> move it below argstr()
+ *   allowed file still blocked                step 2 not saving path, or
+ *                                             step 5 not changed
+ *   everything allowed with "-"               "-" check missing in step 4
+ *   works for sandbox, not inside "sh"        step 3 missing
+ * ============================================================================
+ */

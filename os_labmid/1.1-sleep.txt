@@ -1,0 +1,92 @@
+/*
+ * ============================================================================
+ *  UTIL LAB, TASK 1: sleep        (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 1  user/sleep.c   create the program
+ *   STEP 2  Makefile       add $U/_sleep\ to UPROGS
+ *   TESTING / ERRORS       at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    Write a user program  sleep N  that pauses for N timer TICKS
+ *    (1 tick is about 1/10 second), using the pause() system call.
+ *    If no argument is given, print an error message.
+ *
+ *  KEY FACTS
+ *    argv[0] = "sleep", argv[1] = "10"   ->  need argc == 2
+ *    atoi("10") -> 10   (text to number)
+ *    2026 xv6 name: pause(n).  Older xv6: sleep(n).  If pause is undefined,
+ *    use sleep(n) instead.
+ *    errors go to fd 2 (stderr) with fprintf(2, ...)
+ *    exit(1) = failure, exit(0) = success.  Never just "return".
+ *
+ *  AFTER EDITING:  make qemu
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   user/sleep.c   (new file)
+ * ============================================================================ */
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+int
+main(int argc, char *argv[])
+{
+  /* 1. check arguments: program name + exactly one number */
+  if (argc != 2) {
+    fprintf(2, "usage: sleep ticks\n");
+    exit(1);
+  }
+
+  /* 2. text -> number */
+  int ticks = atoi(argv[1]);
+
+  /* 3. the actual system call; -1 means it failed (e.g. process killed) */
+  if (pause(ticks) < 0) {
+    fprintf(2, "sleep: pause failed\n");
+    exit(1);
+  }
+
+  exit(0);
+}
+
+
+/* ============================================================================
+ * STEP 2 ---------------------------------------------------------------------
+ *   FILE   Makefile
+ *   WHERE  inside UPROGS=  (keep the trailing backslash)
+ *   WHY    without it the program is not put into xv6's disk image
+ *          -> "exec sleep failed"
+ * ============================================================================ */
+
+	$U/_sleep\
+
+
+/* ============================================================================
+ *  TESTING  (xv6 $ prompt)
+ * ============================================================================
+ *   COMMAND           EXPECTED
+ *   ---------------   ---------------------------------------
+ *   sleep 10          pauses ~1 second, then prompt returns
+ *   sleep             usage: sleep ticks
+ *   (outside qemu)    ./grade-lab-util sleep   (only in the lab repo)
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *   SYMPTOM                          CAUSE
+ *   ------------------------------   ------------------------------------
+ *   exec sleep failed                not in UPROGS / Makefile not saved
+ *   implicit declaration of pause    older xv6 -> use sleep(ticks)
+ *   prints "/n" literally            typed /n instead of \n
+ * ============================================================================
+ */

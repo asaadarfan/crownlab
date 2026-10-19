@@ -1,0 +1,148 @@
+/*
+ * ============================================================================
+ *  UTIL LAB, TASK 4: find         (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 1  user/find.c   PART A: open dir + checks
+ *                         PART B: build "path/" prefix
+ *                         PART C: loop over entries, match, recurse
+ *                         PART D: main()
+ *   STEP 2  Makefile      add $U/_find\ to UPROGS
+ *   TESTING / ERRORS      at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    find DIR NAME   ->  print the path of every file/dir under DIR (at any
+ *    depth) whose name is exactly NAME.
+ *        find . b    ->  ./b   ./a/b
+ *
+ *  KEY FACTS
+ *    - A directory is a file full of  struct dirent { ushort inum;
+ *      char name[DIRSIZ]; }   (DIRSIZ = 14, from kernel/fs.h)
+ *    - read(fd, &de, sizeof de) gives one entry at a time.
+ *    - inum == 0  -> empty slot, skip.
+ *    - "." and ".." -> skip, or recursion loops forever.
+ *    - stat(path, &st): st.type is T_DIR or T_FILE.
+ *    - de.name is NOT NUL-terminated if the name is 14 chars -> copy it
+ *      into buf, add '\0', and compare THAT copy.
+ *    - Template: user/ls.c does almost the same thing (one level only).
+ *    - Close every fd you open (xv6: only 16 per process).
+ *
+ *  AFTER EDITING:  make qemu
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   user/find.c   (new file)
+ * ============================================================================ */
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "kernel/fs.h"        /* struct dirent, DIRSIZ */
+#include "user/user.h"
+
+static void
+find(char *path, char *name)
+{
+  char buf[256], *p;
+  int fd;
+  struct dirent de;
+  struct stat st;
+
+  /* ---- PART A: open the directory and check it -------------------------- */
+  if ((fd = open(path, 0)) < 0) {
+    fprintf(2, "find: cannot open %s\n", path);
+    return;
+  }
+  if (fstat(fd, &st) < 0) {
+    fprintf(2, "find: cannot stat %s\n", path);
+    close(fd);
+    return;
+  }
+  if (st.type != T_DIR) {                 /* a file: nothing inside it */
+    close(fd);
+    return;
+  }
+  if (strlen(path) + 1 + DIRSIZ + 1 > sizeof buf) {
+    fprintf(2, "find: path too long\n");
+    close(fd);
+    return;
+  }
+
+  /* ---- PART B: buf = "path/" , p points just after the '/' --------------- */
+  strcpy(buf, path);
+  p = buf + strlen(buf);
+  *p++ = '/';
+
+  /* ---- PART C: every entry in this directory ----------------------------- */
+  while (read(fd, &de, sizeof de) == sizeof de) {
+    if (de.inum == 0)                                     /* empty slot */
+      continue;
+    if (strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
+      continue;                                           /* no loops */
+
+    memmove(p, de.name, DIRSIZ);          /* buf = "path/name" */
+    p[DIRSIZ] = 0;                        /* force NUL terminator */
+
+    if (stat(buf, &st) < 0) {
+      fprintf(2, "find: cannot stat %s\n", buf);
+      continue;
+    }
+    if (strcmp(p, name) == 0)             /* compare the terminated copy */
+      printf("%s\n", buf);
+    if (st.type == T_DIR)                 /* go deeper */
+      find(buf, name);
+  }
+  close(fd);
+}
+
+/* ---- PART D: main --------------------------------------------------------- */
+int
+main(int argc, char *argv[])
+{
+  if (argc != 3) {
+    fprintf(2, "usage: find dir name\n");
+    exit(1);
+  }
+  find(argv[1], argv[2]);
+  exit(0);
+}
+
+
+/* ============================================================================
+ * STEP 2 ---------------------------------------------------------------------
+ *   FILE   Makefile, inside UPROGS=
+ * ============================================================================ */
+
+	$U/_find\
+
+
+/* ============================================================================
+ *  TESTING  (xv6 $ prompt)
+ * ============================================================================
+ *   COMMAND               EXPECTED
+ *   -------------------   ---------------------------------
+ *   echo > b              (creates file b)
+ *   mkdir a
+ *   echo > a/b
+ *   find . b              ./b   and   ./a/b   (order may vary)
+ *   find . nosuch         (prints nothing)
+ *   find nodir b          find: cannot open nodir
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *   SYMPTOM                          CAUSE
+ *   ------------------------------   ----------------------------------
+ *   infinite output / hang           not skipping "." and ".."
+ *   finds top level only             missing recursion on T_DIR
+ *   "cannot open" deep in the tree   fd leak (missing close) -> out of fds
+ *   struct dirent unknown            missing #include "kernel/fs.h"
+ *   long names never match           comparing de.name instead of p
+ * ============================================================================
+ */

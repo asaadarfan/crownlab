@@ -1,0 +1,132 @@
+/*
+ * ============================================================================
+ *  UTIL LAB, TASK 2: sixfive      (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 1  user/sixfive.c   PART A: the sixfive(fd) function
+ *                            PART B: main()
+ *   STEP 2  Makefile         add $U/_sixfive\ to UPROGS
+ *   TESTING / ERRORS         at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    For each input file, print every number that is a multiple of 5 or 6,
+ *    one per line.
+ *      - a number = a run of decimal digits
+ *      - separators = any char in  " -\r\t\n./,"
+ *      - start and end of file also count as separators
+ *      - no arguments -> read standard input (fd 0)
+ *      - file cannot be opened -> print  "sixfive: cannot open xxx"
+ *
+ *  HOW IT WORKS (state machine, one char at a time)
+ *    digit       -> num = num*10 + (c - '0'), indigits = 1
+ *    separator   -> token ended: if it was a valid number and num%5==0 or
+ *                   num%6==0, print it. Reset num/indigits/valid.
+ *    other char  -> valid = 0  (e.g. "x15" is not a number)  [my reading of
+ *                   the spec; check the lab page for this case]
+ *    read() == 0 -> end of file: treat like a separator, then stop
+ *
+ *  AFTER EDITING:  make qemu
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   user/sixfive.c   (new file)
+ * ============================================================================ */
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+static char *seps = " -\r\t\n./,";
+
+/* ---- PART A: process one open file descriptor ---------------------------- */
+static void
+sixfive(int fd)
+{
+  char c;
+  int num = 0;        /* number being built */
+  int indigits = 0;   /* 1 while inside a run of digits */
+  int valid = 1;      /* 0 if the current token had a bad char */
+
+  while (1) {
+    int r = read(fd, &c, 1);           /* 1 = got a byte, 0 = EOF, -1 = error */
+    if (r < 0) {
+      fprintf(2, "sixfive: read error\n");
+      exit(1);
+    }
+
+    if (r == 0 || strchr(seps, c)) {   /* EOF or separator: token ends */
+      if (indigits && valid && (num % 5 == 0 || num % 6 == 0))
+        printf("%d\n", num);
+      num = 0;
+      indigits = 0;
+      valid = 1;
+      if (r == 0)
+        break;                         /* EOF: done with this file */
+    } else if (c >= '0' && c <= '9') { /* digit: extend the number */
+      num = num * 10 + (c - '0');
+      indigits = 1;
+    } else {                           /* any other char spoils the token */
+      valid = 0;
+    }
+  }
+}
+
+/* ---- PART B: main --------------------------------------------------------- */
+int
+main(int argc, char *argv[])
+{
+  if (argc == 1) {                     /* no files: read stdin */
+    sixfive(0);
+    exit(0);
+  }
+
+  for (int i = 1; i < argc; i++) {
+    int fd = open(argv[i], 0);         /* 0 = O_RDONLY */
+    if (fd < 0) {
+      fprintf(2, "sixfive: cannot open %s\n", argv[i]);
+      continue;                        /* try the next file */
+    }
+    sixfive(fd);
+    close(fd);                         /* always free the fd */
+  }
+  exit(0);
+}
+
+
+/* ============================================================================
+ * STEP 2 ---------------------------------------------------------------------
+ *   FILE   Makefile, inside UPROGS=
+ * ============================================================================ */
+
+	$U/_sixfive\
+
+
+/* ============================================================================
+ *  TESTING  (xv6 $ prompt)
+ * ============================================================================
+ *   COMMAND                            EXPECTED
+ *   --------------------------------   ------------------------------
+ *   echo 15 7 -30 4,12 | sixfive       15  30  12   (one per line)
+ *   echo 5 | sixfive                   5   (EOF counts as separator)
+ *   echo x15 10 | sixfive              10  (x15 is not a number)
+ *   sixfive nosuchfile                 sixfive: cannot open nosuchfile
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *   SYMPTOM                            CAUSE
+ *   --------------------------------   ------------------------------
+ *   last number never printed          EOF not treated as separator
+ *   "-30" prints nothing               '-' missing from seps
+ *   numbers glued together (1530)      separator branch not resetting num
+ *   hangs with no args                 waiting on stdin: pipe input in,
+ *                                      or press Ctrl-d
+ * ============================================================================
+ */

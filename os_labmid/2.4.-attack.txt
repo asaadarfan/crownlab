@@ -1,0 +1,110 @@
+/*
+ * ============================================================================
+ *  SYSCALL LAB, TASK 4: Attack xv6     (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ *  NEEDS THE LAB REPO: user/secret.c, user/attack.c and the planted kernel
+ *  bug only exist on the lab's syscall branch, not in plain xv6-riscv.
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 1  read user/secret.c   -> find the marker text and offset
+ *   STEP 2  user/attack.c        -> allocate memory, scan, print secret
+ *   TESTING / ERRORS             at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    The lab planted a bug: the kernel no longer zeroes pages it hands out
+ *    and no longer fills freed pages with junk. So when a process exits,
+ *    its old data stays in the freed pages.
+ *    secret.c writes a secret into its memory and exits.
+ *    Write attack.c so it finds that leftover secret and prints it on its
+ *    own line. Do NOT modify the kernel or secret.c.
+ *    (The grader runs attack twice; either run may succeed.)
+ *
+ *  THE IDEA (OSTEP: why the OS must clear memory between processes)
+ *    secret exits -> its pages go back to the kernel's free list
+ *    attack calls sbrk -> kernel gives it free pages, some of them the
+ *    SAME physical pages secret used, NOT cleared
+ *    attack searches its new memory for the secret's known marker text
+ *    -> prints what follows.  Lesson: zeroing in kalloc() = isolation.
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   user/secret.c   (READ ONLY, do not change)
+ *   LOOK FOR
+ *     - how much memory it sbrk()s
+ *     - the fixed text it writes next to the secret (the MARKER)
+ *     - where the secret sits relative to that text (the OFFSET), e.g.
+ *         strcpy(end, "some marker text");
+ *         strcpy(end + 32, argv[1]);      -> OFFSET = 32
+ *   Copy those two values into MARKER and SECRET_OFFSET below.
+ * ============================================================================ */
+
+
+/* ============================================================================
+ * STEP 2 ---------------------------------------------------------------------
+ *   FILE   user/attack.c   (replace its main with this)
+ *   WHY    sbrk many pages so we likely receive secret's freed pages,
+ *          then scan every byte for the marker.
+ * ============================================================================ */
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+#define PGSIZE        4096
+#define NPAGES        32                                /* >= what secret used */
+#define MARKER        "PUT THE MARKER TEXT FROM secret.c HERE"
+#define SECRET_OFFSET 32                                /* from secret.c */
+
+int
+main(int argc, char *argv[])
+{
+  char *mem = sbrk(NPAGES * PGSIZE);           /* grab fresh (dirty) pages */
+  if (mem == (char *)-1) {
+    fprintf(2, "attack: sbrk failed\n");
+    exit(1);
+  }
+
+  int mlen = strlen(MARKER);
+  int total = NPAGES * PGSIZE;
+
+  for (int i = 0; i + SECRET_OFFSET < total; i++) {
+    if (memcmp(mem + i, MARKER, mlen) == 0) {  /* found secret's leftovers */
+      printf("%s\n", mem + i + SECRET_OFFSET);
+      exit(0);
+    }
+  }
+
+  fprintf(2, "attack: secret not found\n");
+  exit(1);
+}
+
+
+/* ============================================================================
+ *  TESTING  (xv6 $ prompt, lab repo)
+ * ============================================================================
+ *   COMMAND                  EXPECTED
+ *   ----------------------   ------------------------------------
+ *   secret mypassword        (prints nothing, just exits)
+ *   attack                   mypassword
+ *   (outside qemu)           ./grade-lab-syscall attack
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *   SYMPTOM                       CAUSE
+ *   ---------------------------   ---------------------------------------
+ *   secret not found              MARKER text not copied exactly, or
+ *                                 NPAGES smaller than what secret used
+ *   prints garbage                SECRET_OFFSET wrong
+ *   works once, not again         other processes reused those pages;
+ *                                 run "secret x" then "attack" directly
+ *   no secret.c / attack.c        not on the lab's syscall branch
+ * ============================================================================
+ */

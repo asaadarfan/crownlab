@@ -1,0 +1,186 @@
+/*
+ * ============================================================================
+ *  SYSCALL LAB, TASK 2: interpose(mask, path)  -- sandbox with a mask
+ *  (master reference; xv6-riscv)
+ * ============================================================================
+ *
+ * QUESTION
+ *   Add a new system call:   int interpose(int mask, const char *path);
+ *     - mask: bit N set  =>  syscall number N is REJECTED (returns -1).
+ *             e.g. mask = 1 << SYS_open  (= 32768, since SYS_open is 15)
+ *     - path: in this task it is just "-" and is ignored.
+ *     - The mask is stored on the calling process and INHERITED by every
+ *       child created with fork.
+ *   Test program user/sandbox.c:  sandbox MASK PATH CMD [ARGS...]
+ *       sandbox 32768 - cat README   ->   cat: cannot open README
+ *
+ * BIG PICTURE (what happens when a program calls a syscall)
+ *   user calls interpose()  -> stub (from usys.pl) puts SYS_interpose in a7,
+ *   runs ecall -> kernel trap -> syscall() looks up syscalls[a7] ->
+ *   sys_interpose() runs -> return value goes in a0 -> back to user.
+ *
+ * WHAT YOU EDIT: 9 places in 7 files
+ *   REGISTRATION (no logic):  1 user.h   2 usys.pl   3 syscall.h
+ *                             4 syscall.c (table)    5 Makefile
+ *   LOGIC:                    6 proc.h     7 sysproc.c
+ *                             8 proc.c (fork copy)   9 syscall.c (the check)
+ *
+ * AFTER EDITING:  make clean && make qemu
+ * ============================================================================
+ */
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 1.  FILE: user/user.h
+ *   WHERE: with the other system call prototypes (top part of the file).
+ *   WHY:   so user programs (sandbox.c) can call interpose().
+ *   GOTCHA: the trailing semicolon! Missing it breaks EVERY user file
+ *           (you get dozens of errors in ulib.c).
+ * ------------------------------------------------------------------------- */
+int interpose(int, const char*);
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 2.  FILE: user/usys.pl
+ *   WHERE: at the end of the list of entry("...") lines.
+ *   WHY:   this script generates the assembly stub that does
+ *          "li a7, SYS_interpose; ecall; ret".
+ *   IF MISSING: linker error "undefined reference to interpose".
+ * ------------------------------------------------------------------------- */
+entry("interpose");          /* perl, not C: keep the quotes and semicolon */
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 3.  FILE: kernel/syscall.h
+ *   WHERE: after the LAST "#define SYS_..." line.
+ *   WHY:   gives the syscall its number (this is what goes into a7).
+ *   HOW:   use the next unused number (if the last one is 21, use 22).
+ *   IF MISSING: compile error "SYS_interpose undeclared" in syscall.c.
+ * ------------------------------------------------------------------------- */
+#define SYS_interpose 22
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 4.  FILE: kernel/syscall.c   (two small additions)
+ *   WHERE: (a) with the other "extern uint64 sys_...(void);" lines
+ *          (b) inside the syscalls[] table, with the other entries
+ *   WHY:   syscall() calls syscalls[num](), so the table must know it.
+ *   IF MISSING: runtime message "unknown sys call".
+ * ------------------------------------------------------------------------- */
+extern uint64 sys_interpose(void);          /* (a) */
+
+[SYS_interpose] sys_interpose,              /* (b) inside syscalls[] = { ... } */
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 5.  FILE: Makefile
+ *   WHERE: inside UPROGS=  (each line ends with a backslash, except the last)
+ *   WHY:   builds user/sandbox.c into the file system image.
+ *   NOTE:  do NOT add $U/_sbtest\ if you do not have user/sbtest.c --
+ *          make fails on a missing file.
+ *   IF MISSING: in xv6, "sandbox" -> exec sandbox failed / not found.
+ *   ALSO: save the Makefile! (unsaved editor tab = old Makefile gets used)
+ * ------------------------------------------------------------------------- */
+	$U/_sandbox\
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 6.  FILE: kernel/proc.h
+ *   WHERE: inside struct proc, e.g. after "char name[16];"
+ *   WHY:   each process must remember its own list of banned syscalls.
+ * ------------------------------------------------------------------------- */
+  int interpose_mask;          /* bit N set => syscall N is banned */
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 7.  FILE: kernel/sysproc.c
+ *   WHERE: add at the end of the file.
+ *   WHY:   this is the syscall body. argint(0, &mask) reads argument 0 from
+ *          the trapframe (a0). myproc() is the calling process.
+ * ------------------------------------------------------------------------- */
+uint64
+sys_interpose(void)
+{
+  int mask;
+
+  argint(0, &mask);
+  myproc()->interpose_mask = mask;
+  return 0;
+}
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 8.  FILE: kernel/proc.c
+ *   WHERE: in the fork function (kfork() in the 2026 code, fork() in older
+ *          versions), next to the other "np->xxx = p->xxx;" lines
+ *          (for example right after "np->sz = p->sz;").
+ *   WHY:   INHERITANCE. np = new child, p = parent. Without this line a
+ *          child process escapes the ban.
+ * ------------------------------------------------------------------------- */
+  np->interpose_mask = p->interpose_mask;
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 9.  FILE: kernel/syscall.c, inside syscall()
+ *   WHERE: replace the single line
+ *              p->trapframe->a0 = syscalls[num]();
+ *          (inside the "if(num > 0 && num < NELEM(syscalls) && ...)" block)
+ *   WHY:   EVERY syscall passes through syscall(), so this is the one place
+ *          that can enforce the ban. (mask >> num) & 1 tests bit number num.
+ *          a0 is the return value the user program sees.
+ * ------------------------------------------------------------------------- */
+    if((p->interpose_mask >> num) & 1)
+      p->trapframe->a0 = -1;                 /* banned: fail */
+    else
+      p->trapframe->a0 = syscalls[num]();    /* allowed: run it */
+
+
+/* ---------------------------------------------------------------------------
+ * STEP 10.  FILE: user/sandbox.c   (create this file if you do not have it)
+ *   usage: sandbox MASK PATH CMD [ARGS...]
+ *   WHY exec keeps the mask: exec replaces the program but it is the SAME
+ *   process (same struct proc), so interpose_mask stays set.
+ * ------------------------------------------------------------------------- */
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+int
+main(int argc, char *argv[])
+{
+  if (argc < 4) {
+    fprintf(2, "usage: sandbox mask path cmd [args...]\n");
+    exit(1);
+  }
+  int mask = atoi(argv[1]);
+  if (interpose(mask, argv[2]) < 0) {
+    fprintf(2, "sandbox: interpose failed\n");
+    exit(1);
+  }
+  exec(argv[3], &argv[3]);
+  fprintf(2, "sandbox: exec %s failed\n", argv[3]);   /* only if exec failed */
+  exit(1);
+}
+
+
+/* ===========================================================================
+ *  TESTING  (at the xv6 $ prompt, after: make clean && make qemu)
+ * ===========================================================================
+ *   cat README                      -> prints the file (baseline)
+ *   sandbox 32768 - cat README      -> cat: cannot open README   (mask works)
+ *   sandbox 0 - cat README          -> prints the file (mask 0 bans nothing)
+ *   sandbox 32768 - sh              -> then: cat README  fails   (inherited!)
+ *                                      Ctrl-d leaves the inner shell
+ *   mask for syscall N = 1 << N     (look up numbers in kernel/syscall.h)
+ *
+ *  IF SOMETHING GOES WRONG
+ *   undefined reference to interpose   -> step 2 missing
+ *   SYS_interpose undeclared           -> step 3 missing / not saved
+ *   dozens of errors starting in ulib.c-> missing ";" in user.h (step 1)
+ *   unknown sys call                   -> step 4 missing
+ *   sandbox not found                  -> step 5 / not saved / need make clean
+ *   README still prints when banned    -> step 9 missing, or step 7 not
+ *                                         storing the mask
+ *   works in sandbox but not in "sh"   -> step 8 missing
+ * ===========================================================================
+ */

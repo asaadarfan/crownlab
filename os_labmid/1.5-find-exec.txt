@@ -1,0 +1,171 @@
+/*
+ * ============================================================================
+ *  UTIL LAB, TASK 5: exec  (find ... -exec cmd)   (master reference)
+ * ============================================================================
+ *
+ *  PREREQUISITE: Task 4 (find) works. This REPLACES user/find.c.
+ *                Lines marked  NEW  are the only changes vs Task 4.
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   STEP 1  user/find.c   PART A: run()   fork + exec + wait     NEW
+ *                         PART B: find()  carries ec/ev, calls run()
+ *                         PART C: main()  parses "-exec"          NEW
+ *   (Makefile unchanged: $U/_find\ already there)
+ *   TESTING / ERRORS      at the bottom
+ * ----------------------------------------------------------------------------
+ *
+ *  QUESTION
+ *    find DIR NAME -exec CMD [ARGS...]
+ *    For each match, run   CMD ARGS... <path>   instead of printing it.
+ *        find . wc -exec echo hi    ->   hi ./wc
+ *
+ *  HOW IT WORKS
+ *    argv:  [0]find [1]. [2]wc [3]-exec [4]echo [5]hi
+ *                                       ^ ev = &argv[4], ec = argc-4 = 2
+ *    run(): args = { ev[0], ..., ev[ec-1], path, 0 }
+ *           fork -> child: exec(args[0], args)   (never returns if OK)
+ *                   parent: wait(0)              (keeps output in order)
+ *    argv for exec MUST end with a 0 (null pointer).
+ *    MAXARG (kernel/param.h) = max size of argv.
+ *    xv6 exec has no PATH search: "echo" works because we run from "/".
+ *
+ *  AFTER EDITING:  make qemu
+ * ============================================================================
+ */
+
+
+/* ============================================================================
+ * STEP 1 ---------------------------------------------------------------------
+ *   FILE   user/find.c   (replace the whole file)
+ * ============================================================================ */
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "kernel/fs.h"
+#include "kernel/param.h"     /* NEW: MAXARG */
+#include "user/user.h"
+
+/* ---- PART A: run "ev[0] ev[1] ... path" in a child, wait for it ---- NEW - */
+static void
+run(char *path, int ec, char **ev)
+{
+  char *args[MAXARG];
+
+  if (ec + 2 > MAXARG) {                 /* words + path + final 0 */
+    fprintf(2, "find: too many arguments\n");
+    return;
+  }
+  for (int i = 0; i < ec; i++)
+    args[i] = ev[i];                     /* copy command words */
+  args[ec] = path;                       /* found file = last argument */
+  args[ec + 1] = 0;                      /* argv must end with 0 */
+
+  int pid = fork();
+  if (pid < 0) {
+    fprintf(2, "find: fork failed\n");
+    return;
+  }
+  if (pid == 0) {                        /* child */
+    exec(args[0], args);
+    fprintf(2, "find: exec %s failed\n", args[0]);   /* only if exec failed */
+    exit(1);                             /* child must not continue find! */
+  }
+  wait(0);                               /* parent */
+}
+
+/* ---- PART B: find, now with ec/ev (ec == 0 means just print) ------------- */
+static void
+find(char *path, char *name, int ec, char **ev)          /* NEW params */
+{
+  char buf[256], *p;
+  int fd;
+  struct dirent de;
+  struct stat st;
+
+  if ((fd = open(path, 0)) < 0) {
+    fprintf(2, "find: cannot open %s\n", path);
+    return;
+  }
+  if (fstat(fd, &st) < 0) {
+    fprintf(2, "find: cannot stat %s\n", path);
+    close(fd);
+    return;
+  }
+  if (st.type != T_DIR) {
+    close(fd);
+    return;
+  }
+  if (strlen(path) + 1 + DIRSIZ + 1 > sizeof buf) {
+    fprintf(2, "find: path too long\n");
+    close(fd);
+    return;
+  }
+
+  strcpy(buf, path);
+  p = buf + strlen(buf);
+  *p++ = '/';
+
+  while (read(fd, &de, sizeof de) == sizeof de) {
+    if (de.inum == 0)
+      continue;
+    if (strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
+      continue;
+    memmove(p, de.name, DIRSIZ);
+    p[DIRSIZ] = 0;
+    if (stat(buf, &st) < 0) {
+      fprintf(2, "find: cannot stat %s\n", buf);
+      continue;
+    }
+    if (strcmp(p, name) == 0) {
+      if (ec > 0)                         /* NEW */
+        run(buf, ec, ev);                 /* NEW */
+      else
+        printf("%s\n", buf);
+    }
+    if (st.type == T_DIR)
+      find(buf, name, ec, ev);            /* NEW: pass ec/ev down */
+  }
+  close(fd);
+}
+
+/* ---- PART C: main ---------------------------------------------------- NEW */
+int
+main(int argc, char *argv[])
+{
+  if (argc == 3) {                                         /* plain find */
+    find(argv[1], argv[2], 0, 0);
+  } else if (argc >= 5 && strcmp(argv[3], "-exec") == 0) { /* with -exec */
+    find(argv[1], argv[2], argc - 4, &argv[4]);
+  } else {
+    fprintf(2, "usage: find dir name [-exec cmd [args...]]\n");
+    exit(1);
+  }
+  exit(0);
+}
+
+
+/* ============================================================================
+ *  TESTING  (xv6 $ prompt)
+ * ============================================================================
+ *   COMMAND                        EXPECTED
+ *   ----------------------------   ------------------------------
+ *   find . wc -exec echo hi        hi ./wc
+ *   find . b -exec echo found      found ./b   found ./a/b
+ *   find . b                       ./b  ./a/b   (Task 4 still works)
+ *   find . b -exec nosuchcmd       find: exec nosuchcmd failed
+ *   find . b -exec                 usage message
+ *   (lab repo)  sh < findtest.sh   prints "$ " prompts too: that is normal
+ *
+ * ============================================================================
+ *  IF SOMETHING GOES WRONG
+ * ============================================================================
+ *   SYMPTOM                            CAUSE
+ *   --------------------------------   ------------------------------
+ *   output repeated / doubled          child missing exit(1) after exec
+ *   output out of order                parent missing wait(0)
+ *   exec fails for every command       args not terminated with 0
+ *   MAXARG undeclared                  missing #include "kernel/param.h"
+ * ============================================================================
+ */

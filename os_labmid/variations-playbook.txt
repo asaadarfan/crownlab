@@ -1,0 +1,427 @@
+/*
+ * ============================================================================
+ *  VARIATIONS PLAYBOOK: what to do when the exam task is "the same, but..."
+ *  (companion to the util-*.c.txt and syscall-*.c.txt reference files)
+ * ============================================================================
+ *
+ * ----------------------------------------------------------------------------
+ *  QUICK INDEX
+ * ----------------------------------------------------------------------------
+ *   PART 0  How to attack ANY unfamiliar task (5-step method)
+ *   PART 1  User program building blocks (copy-paste patterns)
+ *             1A args   1B read file/stdin   1C fork+exec+wait
+ *             1D pipe   1E walk a directory  1F error handling
+ *   PART 2  Util variations: sleep, sixfive, memdump, find, exec
+ *   PART 3  Syscall: the universal recipe (any new syscall)
+ *   PART 4  Syscall argument / return patterns
+ *             4A int arg   4B string arg   4C return a number
+ *             4D fill a user struct (copyout)
+ *   PART 5  Syscall variations (getppid, counters, nproc, freemem,
+ *           trace-style printing, allow-list, per-process state)
+ *   PART 6  Where things live in xv6 (file map + grep tricks)
+ *   PART 7  Build / runtime error decoder
+ *   PART 8  Exam-day checklist
+ * ============================================================================
+ */
+
+
+/* ############################################################################
+ *  PART 0   HOW TO ATTACK ANY UNFAMILIAR TASK
+ * ############################################################################
+ *
+ *   1. CLASSIFY:  is it a USER PROGRAM (only user/ + Makefile)
+ *                 or a SYSCALL (kernel/ + registration files)?
+ *                 "write a program that..." -> user program
+ *                 "add a system call / kernel should..." -> syscall
+ *
+ *   2. FIND THE CLOSEST TASK you already know:
+ *        reads input / parses text         -> sixfive
+ *        interprets raw bytes              -> memdump
+ *        walks directories                 -> find (and user/ls.c)
+ *        runs other programs               -> find -exec
+ *        kernel remembers something per
+ *        process / inherited by children   -> interpose
+ *        kernel reports info back to user  -> PART 4C / 4D below
+ *
+ *   3. LIST THE DIFFERENCES in one line each ("print count instead of
+ *      numbers", "match suffix instead of exact name", ...).
+ *
+ *   4. CHANGE ONLY THOSE LINES. Keep the skeleton (args check, open/close,
+ *      error messages, exit codes) exactly as in the reference.
+ *
+ *   5. TEST the normal case, the error case, and an edge case
+ *      (empty input, missing arg, last item with no trailing newline).
+ */
+
+
+/* ############################################################################
+ *  PART 1   USER PROGRAM BUILDING BLOCKS
+ * ############################################################################
+ *   Every user program:
+ *     #include "kernel/types.h"
+ *     #include "kernel/stat.h"
+ *     #include "user/user.h"
+ *     (+ "kernel/fs.h" for dirent, "kernel/fcntl.h" for O_RDONLY etc.,
+ *        "kernel/param.h" for MAXARG)
+ *     ends with exit(0) / exit(1), and is added to UPROGS in the Makefile.
+ */
+
+/* ---- 1A  ARGUMENTS ------------------------------------------------------- */
+  if (argc != 2) {                          /* change 2 to what you need */
+    fprintf(2, "usage: prog arg\n");
+    exit(1);
+  }
+  int n = atoi(argv[1]);                    /* text -> number */
+  /* optional flag:  if (argc > 2 && strcmp(argv[2], "-v") == 0) ... */
+
+/* ---- 1B  READ A FILE OR STDIN, ONE CHAR AT A TIME ----------------------- */
+  int fd = (argc > 1) ? open(argv[1], O_RDONLY) : 0;   /* 0 = stdin */
+  if (fd < 0) { fprintf(2, "prog: cannot open %s\n", argv[1]); exit(1); }
+  char c;
+  int r;
+  while ((r = read(fd, &c, 1)) > 0) {
+    /* handle c */
+  }
+  if (r < 0) { fprintf(2, "prog: read error\n"); exit(1); }
+  if (fd != 0) close(fd);
+  /* Faster variant: read(fd, buf, sizeof buf) and loop over buf[0..n-1]. */
+
+/* ---- 1C  RUN ANOTHER PROGRAM: fork + exec + wait ------------------------- */
+  char *args[] = { "echo", "hi", 0 };       /* MUST end with 0 */
+  int pid = fork();
+  if (pid < 0) { fprintf(2, "fork failed\n"); exit(1); }
+  if (pid == 0) {
+    exec(args[0], args);
+    fprintf(2, "exec %s failed\n", args[0]);
+    exit(1);                                /* child must exit on failure */
+  }
+  int status;
+  wait(&status);                            /* status = child's exit code */
+
+/* ---- 1D  PIPE between parent and child ---------------------------------- */
+  int p[2];                                 /* p[0] read end, p[1] write end */
+  if (pipe(p) < 0) { fprintf(2, "pipe failed\n"); exit(1); }
+  if (fork() == 0) {                        /* child: reader */
+    close(p[1]);
+    char buf[64];
+    int k;
+    while ((k = read(p[0], buf, sizeof buf)) > 0)   /* 0 = all writers closed */
+      write(1, buf, k);
+    close(p[0]);
+    exit(0);
+  }
+  close(p[0]);                              /* parent: writer */
+  write(p[1], "hello\n", 6);
+  close(p[1]);                              /* !!! or the child hangs */
+  wait(0);
+  /* Redirect stdout into the pipe in a child:
+       close(1); dup(p[1]); close(p[0]); close(p[1]); exec(...);
+     dup() takes the LOWEST free fd, so after close(1) it becomes fd 1. */
+
+/* ---- 1E  WALK A DIRECTORY (one level; recurse for subdirs) --------------- */
+  /* see util-4-find.c.txt for the full version */
+  struct dirent de;
+  struct stat st;
+  while (read(fd, &de, sizeof de) == sizeof de) {
+    if (de.inum == 0) continue;
+    if (!strcmp(de.name, ".") || !strcmp(de.name, "..")) continue;
+    /* build "dir/name" into buf, NUL-terminate, stat(buf, &st) */
+    /* st.type: T_DIR / T_FILE / T_DEVICE ;  st.size = bytes */
+  }
+
+/* ---- 1F  ERROR HANDLING RULES (graded!) ---------------------------------- */
+  /*  - check EVERY return value: open, read, fork, pipe, exec, sbrk, stat
+   *  - errors -> fprintf(2, ...), then exit(1) or continue
+   *  - close every fd you opened, on every path (including error paths)
+   *  - never index argv[i] without checking argc first                   */
+
+
+/* ############################################################################
+ *  PART 2   UTIL VARIATIONS
+ * ############################################################################
+ *
+ *  ---- sleep ---------------------------------------------------------------
+ *   "sleep in seconds"          pause(atoi(argv[1]) * 10)   (~10 ticks/sec)
+ *   "reject negative/non-num"   check every char of argv[1] is '0'..'9'
+ *   "uptime program"            printf("%d\n", uptime());   (ticks since boot)
+ *
+ *  ---- sixfive -------------------------------------------------------------
+ *   different multiples         change (num % 5 == 0 || num % 6 == 0)
+ *   "print the count"           int count = 0; count++ instead of printf,
+ *                               printf("%d\n", count) at the end
+ *   "print the sum"             same, sum += num
+ *   different separators        edit the seps string
+ *   "only even/odd/primes"      replace the condition with a helper function
+ *   "print line numbers"        int line = 1; if (c == '\n') line++;
+ *                               printf("%d: %d\n", line, num)
+ *   "count words / lines"       same state machine: a token ends at a
+ *                               separator -> words++ ; '\n' -> lines++
+ *   KEEP: EOF counts as a separator (flush the last token).
+ *
+ *  ---- memdump -------------------------------------------------------------
+ *   "only implement i and c"    delete the other branches; keep enough()
+ *   new format char, e.g.
+ *     'x' 4-byte hex            int v; enough(4); memcpy; printf("%x\n", v)
+ *     'u' unsigned 4-byte       uint v; ... printf("%d\n", v)  (xv6 printf
+ *                               has no %u; small values print fine)
+ *     'b' 1 byte as number      printf("%d\n", (uchar)*p); p += 1
+ *     'l' 8-byte decimal        uint64 v; ... printf("%ld\n", v)
+ *   "repeat count" like "3i"    parse digits before the char into k,
+ *                               loop the branch k times
+ *   "print offsets"             printf("%d: ...", (int)(p - data), ...)
+ *   PATTERN for any new type:   size -> enough() -> memcpy -> print -> p+=size
+ *   Little-endian: first byte = lowest byte.
+ *
+ *  ---- find ----------------------------------------------------------------
+ *   match suffix ".c"           compare the tail: n = strlen(p), k = strlen(s);
+ *                               n >= k && strcmp(p + n - k, s) == 0
+ *   match substring             write a small contains(a, b) loop
+ *   only files / only dirs      add  && st.type == T_FILE  to the match test
+ *   size filter                 && st.size > N
+ *   no recursion (one level)    delete the  if (st.type == T_DIR) find(...)
+ *   count matches               global int count; count++; print at end
+ *   max depth                   add an int depth param; recurse with depth+1;
+ *                               stop when depth == max
+ *
+ *  ---- find -exec / running commands ---------------------------------------
+ *   path NOT last argument      put path where required in args[]
+ *   run once with all matches   collect paths in an array, one exec at end
+ *   xargs-style (read stdin)    read a line into buf, args = {cmd..., buf, 0},
+ *                               fork/exec/wait per line
+ *   report exit status          wait(&status); printf("%s: %d\n", path, status)
+ *   ALWAYS: args[...] ends with 0; child exit(1) after failed exec;
+ *           parent wait().
+ */
+
+
+/* ############################################################################
+ *  PART 3   SYSCALL: THE UNIVERSAL RECIPE  (works for ANY new syscall "foo")
+ * ############################################################################
+ *
+ *   REGISTRATION (always the same 5 edits, only the name changes)
+ *   ------------------------------------------------------------------------
+ *   1 user/user.h        int foo(int);                 <- match the args
+ *   2 user/usys.pl       entry("foo");
+ *   3 kernel/syscall.h   #define SYS_foo 23            <- next free number
+ *   4 kernel/syscall.c   extern uint64 sys_foo(void);
+ *                        [SYS_foo] sys_foo,            <- in syscalls[]
+ *   5 Makefile           $U/_footest\                  <- your test program
+ *
+ *   LOGIC (depends on the task)
+ *   ------------------------------------------------------------------------
+ *   6 kernel/sysproc.c   uint64 sys_foo(void) { ...; return value; }
+ *   7 per-process state? -> field in struct proc (kernel/proc.h)
+ *   8 inherited?         -> copy it in the fork function (kernel/proc.c)
+ *   9 affects EVERY syscall (block / count / print)?
+ *                        -> edit syscall() in kernel/syscall.c
+ *  10 helper in another kernel file (proc.c, kalloc.c)?
+ *                        -> put its prototype in kernel/defs.h
+ *                           (that is how sysproc.c can call it)
+ *
+ *   TEST PROGRAM (user/footest.c)
+ *     int r = foo(5); printf("foo returned %d\n", r); exit(0);
+ */
+
+
+/* ############################################################################
+ *  PART 4   ARGUMENT / RETURN PATTERNS (inside sys_foo)
+ * ############################################################################
+ *   Kernel can NOT dereference user pointers (different page table).
+ *   Use these helpers instead:
+ *     argint(n, &i)              n-th arg as int
+ *     argaddr(n, &a)             n-th arg as a user address (uint64)
+ *     argstr(n, buf, max)        copy n-th arg string into kernel buf; <0 bad
+ *     copyout(pagetable, uaddr, (char*)&kobj, sizeof kobj)   kernel -> user
+ *     copyin(pagetable, (char*)&kobj, uaddr, sizeof kobj)    user -> kernel
+ *   Return value of sys_foo -> a0 -> what the user program gets.
+ */
+
+/* ---- 4A  INT ARGUMENT ---------------------------------------------------- */
+uint64
+sys_foo(void)
+{
+  int x;
+  argint(0, &x);
+  if (x < 0)
+    return -1;                  /* validate! */
+  myproc()->somefield = x;
+  return 0;
+}
+
+/* ---- 4B  STRING ARGUMENT ------------------------------------------------- */
+uint64
+sys_foo(void)
+{
+  char name[MAXPATH];
+  if (argstr(0, name, MAXPATH) < 0)
+    return -1;
+  printf("kernel got: %s\n", name);
+  return 0;
+}
+
+/* ---- 4C  RETURN A NUMBER (e.g. getppid, count, ticks) -------------------- */
+uint64
+sys_foo(void)
+{
+  return myproc()->pid;         /* whatever value the task asks for */
+}
+
+/* ---- 4D  FILL A STRUCT IN USER MEMORY (copyout) -------------------------- */
+/*   shared struct in a header both sides include, e.g. kernel/foo.h:
+ *       struct fooinfo { uint64 a; uint64 b; };
+ *   user side:  struct fooinfo fi; foo(&fi);                              */
+uint64
+sys_foo(void)
+{
+  uint64 uaddr;
+  struct fooinfo fi;
+  struct proc *p = myproc();
+
+  argaddr(0, &uaddr);
+  fi.a = 1;                     /* fill from kernel data */
+  fi.b = 2;
+  if (copyout(p->pagetable, uaddr, (char *)&fi, sizeof fi) < 0)
+    return -1;
+  return 0;
+}
+
+
+/* ############################################################################
+ *  PART 5   SYSCALL VARIATIONS (how each one maps onto the recipe)
+ * ############################################################################
+ *
+ *  ---- getppid() : parent's pid ------------------------------------------
+ *   sysproc.c   return myproc()->parent->pid;      (4C)
+ *   (simple exam version; the strict version holds wait_lock in proc.c)
+ *
+ *  ---- count how many syscalls this process made ---------------------------
+ *   proc.h      int syscount;
+ *   syscall.c   in syscall(), before dispatch:  p->syscount++;
+ *   sysproc.c   sys_getcount: return myproc()->syscount;
+ *   fork copy?  only if the task says children inherit it
+ *
+ *  ---- trace-style: PRINT each syscall instead of blocking -----------------
+ *   same as interpose task 2, but in syscall():
+ *     p->trapframe->a0 = syscalls[num]();
+ *     if ((p->tracemask >> num) & 1)
+ *       printf("%d: syscall %s -> %d\n", p->pid, names[num],
+ *              (int)p->trapframe->a0);
+ *   needs:  static char *names[] = { [SYS_fork] "fork", [SYS_exit] "exit",
+ *           ... , [SYS_foo] "foo" };   in syscall.c
+ *
+ *  ---- ALLOW-list instead of BAN-list --------------------------------------
+ *   flip the test:  if (!((p->mask >> num) & 1))  -> reject
+ *   careful: allow at least exit, or the process can never finish
+ *
+ *  ---- block for CHILDREN only, not the caller ------------------------------
+ *   store in a second field  child_mask ; in fork:
+ *     np->interpose_mask = p->child_mask;
+ *
+ *  ---- number of active processes (nproc) -----------------------------------
+ *   proc.c (proc[] lives here):
+ *     int
+ *     count_procs(void)
+ *     {
+ *       struct proc *p;
+ *       int n = 0;
+ *       for (p = proc; p < &proc[NPROC]; p++) {
+ *         acquire(&p->lock);
+ *         if (p->state != UNUSED)
+ *           n++;
+ *         release(&p->lock);
+ *       }
+ *       return n;
+ *     }
+ *   defs.h:     int count_procs(void);
+ *   sysproc.c:  return count_procs();
+ *
+ *  ---- amount of free memory (freemem) --------------------------------------
+ *   kalloc.c:
+ *     uint64
+ *     free_bytes(void)
+ *     {
+ *       struct run *r;
+ *       uint64 n = 0;
+ *       acquire(&kmem.lock);
+ *       for (r = kmem.freelist; r; r = r->next)
+ *         n += PGSIZE;
+ *       release(&kmem.lock);
+ *       return n;
+ *     }
+ *   defs.h:     uint64 free_bytes(void);
+ *
+ *  ---- syscall with TWO+ ints -----------------------------------------------
+ *   argint(0, &a); argint(1, &b);   user.h: int foo(int, int);
+ *
+ *  ---- block a syscall only for a specific argument -------------------------
+ *   like task 3: in syscall(), read the argument with argint/argstr(0, ...)
+ *   BEFORE the call (a0 still holds arg 0), decide, then call or return -1.
+ */
+
+
+/* ############################################################################
+ *  PART 6   WHERE THINGS LIVE IN xv6
+ * ############################################################################
+ *   WHAT                               FILE
+ *   --------------------------------   ---------------------------------
+ *   syscall numbers                    kernel/syscall.h
+ *   dispatch table + syscall()         kernel/syscall.c
+ *   argint / argaddr / argstr          kernel/syscall.c
+ *   process syscalls (getpid, kill..)  kernel/sysproc.c
+ *   file syscalls (open, read...)      kernel/sysfile.c
+ *   struct proc                        kernel/proc.h
+ *   fork / exit / wait / proc[]        kernel/proc.c
+ *   kernel function prototypes         kernel/defs.h
+ *   free page list (kalloc/kfree)      kernel/kalloc.c
+ *   copyout / copyin                   kernel/vm.c
+ *   trap entry (usertrap)              kernel/trap.c
+ *   limits NPROC NOFILE MAXARG MAXPATH kernel/param.h
+ *   user syscall prototypes            user/user.h
+ *   user library (strlen, atoi...)     user/ulib.c, user/printf.c
+ *   example programs                   user/ls.c, cat.c, echo.c, grep.c
+ *
+ *   FINDING THINGS FAST (in a normal terminal, in the xv6 folder):
+ *     grep -n "sys_getpid" kernel/*.c       where an existing syscall lives
+ *     grep -rn "SYS_open" kernel/ user/     every place a syscall appears
+ *     grep -n "np->" kernel/proc.c          the fork copy lines
+ *   TRICK: copy an EXISTING similar syscall (sys_getpid, sys_uptime,
+ *          sys_kill) and follow it through every file it appears in.
+ */
+
+
+/* ############################################################################
+ *  PART 7   ERROR DECODER
+ * ############################################################################
+ *   MESSAGE                               USUAL CAUSE
+ *   -----------------------------------   ---------------------------------
+ *   exec X failed                         X not in UPROGS / Makefile unsaved
+ *   undefined reference to foo            missing entry("foo") in usys.pl
+ *   SYS_foo undeclared                    missing #define in syscall.h
+ *   sys_foo undeclared                    missing extern in syscall.c
+ *   unknown sys call N                    missing [SYS_foo] in syscalls[]
+ *   implicit declaration of function      missing prototype (user.h for
+ *                                         user code, defs.h for kernel)
+ *   dozens of errors in ulib.c            missing ; in user/user.h
+ *   unused variable (as error)            xv6 builds with -Werror:
+ *                                         delete or use the variable
+ *   panic: ... / scause 0xd or 0xf        kernel used a bad pointer
+ *                                         (deref'd a user address?)
+ *   program hangs                         pipe write end left open, or
+ *                                         reading stdin with no input
+ *   after any kernel edit: make clean && make qemu
+ */
+
+
+/* ############################################################################
+ *  PART 8   EXAM-DAY CHECKLIST
+ * ############################################################################
+ *   [ ] read the task twice; underline exact output format and messages
+ *   [ ] user program or syscall?  (PART 0 step 1)
+ *   [ ] start from the closest reference file, change only the differences
+ *   [ ] UPROGS updated AND Makefile saved
+ *   [ ] every syscall return value checked; errors to fd 2
+ *   [ ] every fd closed; every child exits; parent waits
+ *   [ ] kernel: field in proc.h? fork copy? defs.h prototype?
+ *   [ ] make clean && make qemu ; test normal + error + edge case
+ *   [ ] build has zero warnings (warnings are errors in xv6)
+ */
